@@ -1,0 +1,490 @@
+﻿-- Initialization
+local Stats = game:GetService('Stats')
+local Players = game:GetService('Players')
+local RunService = game:GetService('RunService')
+local ReplicatedStorage = game:GetService('ReplicatedStorage')
+local Workspace = game:GetService('Workspace')
+local CoreGui = game:GetService('CoreGui')
+local UserInputService = game:GetService("UserInputService")
+
+-- Load Libraries
+local function loadLibrary(url)
+    local success, library = pcall(function()
+        return loadstring(game:HttpGet(url))()
+    end)
+    if not success then
+        warn("Failed to load library from " .. url)
+        return nil
+    end
+    return library
+end
+
+local Nurysium_Util = loadLibrary('https://raw.githubusercontent.com/flezzpe/Nurysium/main/nurysium_helper.lua')
+local library = loadLibrary('https://raw.githubusercontent.com/Tevfnisass/Ui-Modules/main/Ui-Lib-Module.lua.txt')
+
+if not Nurysium_Util or not library then
+    return -- Exit if libraries fail to load
+end
+
+-- Player and Camera
+local local_player = Players.LocalPlayer
+local camera = Workspace.CurrentCamera
+
+-- Global Variables
+getgenv().aura_Enabled = false
+getgenv().hit_sound_Enabled = false
+getgenv().hit_effect_Enabled = false
+getgenv().optimize_Enabled = false
+getgenv().autoSpam_Enabled = false
+getgenv().antiCurve_Enabled = false
+getgenv().visualizer_Enabled = false
+
+-- Learning Data Initialization
+local learningData = {
+    failedAttempts = 0,
+    successfulParries = 0,
+    lastFailureTime = 0,
+    lastSuccessTime = 0
+}
+
+-- Library UI Initialization
+task.wait(1)
+local main = library.new()
+local tab = main.create_tab('Main')
+local tab1 = main.create_tab('Optimize')
+local tab2 = main.create_tab('Visual')
+
+-- Utility Functions
+local nurysium_Data = nil
+local hit_Sound = nil
+local closest_Entity = nil
+local parry_remote = nil
+
+local function initialize_hit_sound(dataFolder_name)
+    nurysium_Data = Instance.new('Folder', CoreGui)
+    nurysium_Data.Name = dataFolder_name
+
+    hit_Sound = Instance.new('Sound', nurysium_Data)
+    hit_Sound.SoundId = 'rbxassetid://8632670510'
+    hit_Sound.Volume = 5
+end
+
+local function get_closest_entity(object)
+    local closest
+    local max_distance = math.huge
+
+    for _, entity in pairs(Workspace:FindFirstChild('Alive'):GetChildren()) do
+        if entity:IsA('Model') and entity:FindFirstChild('HumanoidRootPart') and entity.Name ~= local_player.Name then
+            local distance = (object.Position - entity.HumanoidRootPart.Position).Magnitude
+            if distance < max_distance then
+                closest_Entity = entity
+                max_distance = distance
+            end
+        end
+    end
+
+    return closest_Entity
+end
+
+local function resolve_parry_remote()
+    local services = {
+        game:GetService('AdService'),
+        game:GetService('SocialService')
+    }
+
+    for _, service in pairs(services) do
+        local temp_remote = service:FindFirstChildOfClass('RemoteEvent')
+
+        if temp_remote and temp_remote.Name:find('\n') then
+            parry_remote = temp_remote
+            break
+        end
+    end
+end
+
+-- Event Handlers
+if ReplicatedStorage:FindFirstChild('Remotes') and ReplicatedStorage.Remotes:FindFirstChild('ParrySuccess') then
+    ReplicatedStorage.Remotes.ParrySuccess.OnClientEvent:Connect(function()
+        if getgenv().hit_sound_Enabled then
+            hit_Sound:Play()
+        end
+
+        if getgenv().hit_effect_Enabled then
+            local hit_effect = game:GetObjects("rbxassetid://17407244385")[1]
+            if hit_effect then
+                hit_effect.Parent = Nurysium_Util.getBall()
+                hit_effect:Emit(4)
+
+                task.delay(5, function()
+                    if hit_effect and hit_effect.Parent then
+                        hit_effect:Destroy()
+                    end
+                end)
+            end
+        end
+
+        learningData.successfulParries = learningData.successfulParries + 1
+        learningData.lastSuccessTime = tick()
+    end)
+else
+    warn("ReplicatedStorage.Remotes.ParrySuccess not found.")
+end
+
+local aura_table = {
+    canParry = true,
+    is_Spamming = false,
+    parry_Range = 0,
+    spam_Range = 0,
+    hit_Count = 0,
+    hit_Time = tick(),
+}
+
+if ReplicatedStorage:FindFirstChild('Remotes') and ReplicatedStorage.Remotes:FindFirstChild('ParrySuccessAll') then
+    ReplicatedStorage.Remotes.ParrySuccessAll.OnClientEvent:Connect(function()
+        aura_table.hit_Count = aura_table.hit_Count + 1
+        task.delay(0.15, function()
+            aura_table.hit_Count = aura_table.hit_Count - 1
+        end)
+    end)
+else
+    warn("ReplicatedStorage.Remotes.ParrySuccessAll not found.")
+end
+
+if Workspace:FindFirstChild("Balls") then
+    Workspace.Balls.ChildRemoved:Connect(function(child)
+        aura_table.hit_Count = 0
+        aura_table.is_Spamming = false
+    end)
+else
+    warn("Workspace.Balls not found.")
+end
+
+-- Visualizer Functions
+local visualizer
+local originalSize = 10
+local maxSize = 100
+
+local function createVisualizer()
+    if visualizer then
+        visualizer:Destroy()
+    end
+
+    visualizer = Instance.new("Part")
+    visualizer.Shape = Enum.PartType.Ball
+    visualizer.Size = Vector3.new(originalSize, originalSize, originalSize)
+    visualizer.Anchored = true
+    visualizer.CanCollide = false
+    visualizer.Material = Enum.Material.ForceField
+    visualizer.BrickColor = BrickColor.new("Bright green")
+    visualizer.Transparency = 0.7
+    visualizer.Parent = Workspace
+
+    RunService.Heartbeat:Connect(function()
+        if visualizer and local_player and local_player.Character and local_player.Character.PrimaryPart then
+            visualizer.CFrame = local_player.Character.PrimaryPart.CFrame
+        end
+    end)
+end
+
+local function updateVisualizerSize(ball_Speed)
+    if visualizer then
+        local newSize = math.clamp(originalSize + (ball_Speed / 100), originalSize, maxSize)
+        visualizer.Size = Vector3.new(newSize, newSize, newSize)
+        aura_table.parry_Range = newSize * 10
+    end
+end
+
+local function updateVisualizer(isTargeted)
+    if visualizer then
+        visualizer.BrickColor = isTargeted and BrickColor.new("Bright red") or BrickColor.new("Bright green")
+    end
+end
+
+-- Enhanced Auto-Spam Function
+local autoSpam_Threshold = 20
+local speed_Check_Interval = 0.1
+local autoSpam_Detection_Threshold = 15 -- Threshold for detecting spam
+
+local function updateAutoSpamBasedOnSpeedAndDistance()
+    local self = Nurysium_Util.getBall()
+    if not self then
+        return
+    end
+
+    local ball_Velocity = self.AssemblyLinearVelocity
+    local ball_Speed = ball_Velocity.Magnitude
+    local ball_Position = self.Position
+    local player_Position = local_player.Character.PrimaryPart.Position
+    local ball_Distance = (player_Position - ball_Position).Magnitude
+
+    -- Update auto spam settings based on speed and distance
+    local min_Speed_Threshold = 20
+    local min_Distance_Threshold = 10
+
+    if ball_Speed > min_Speed_Threshold and ball_Distance < min_Distance_Threshold then
+        aura_table.is_Spamming = true
+    else
+        aura_table.is_Spamming = false
+    end
+end
+
+local function detectAutoSpam()
+    local spamCount = 0
+    while true do
+        task.wait(speed_Check_Interval)
+
+        if aura_table.is_Spamming then
+            spamCount = spamCount + 1
+            if spamCount > autoSpam_Detection_Threshold then
+                warn("Auto-Spam Detected!")
+                -- Handle detection logic (e.g., notify user, adjust settings)
+            end
+        else
+            spamCount = 0
+        end
+    end
+end
+
+task.spawn(function()
+    while true do
+        if getgenv().autoSpam_Enabled then
+            updateAutoSpamBasedOnSpeedAndDistance()
+
+            local hit_Count = aura_table.hit_Count
+            local hit_Threshold = 2
+
+            if hit_Count > hit_Threshold then
+                aura_table.is_Spamming = true
+            end
+
+            local self = Nurysium_Util.getBall()
+            if self then
+                updateVisualizerSize(self.AssemblyLinearVelocity.Magnitude)
+            end
+        end
+        task.wait(speed_Check_Interval)
+    end
+end)
+
+-- Adaptive Auto Parry Logic
+local function predictParryPosition(ball_Position, ball_Velocity, ping)
+    local timeToImpact = (ball_Position - local_player.Character.PrimaryPart.Position).Magnitude / ball_Velocity.Magnitude
+    local predicted_Position = ball_Position + (ball_Velocity * timeToImpact)
+    return predicted_Position
+end
+
+task.spawn(function()
+    RunService.PreRender:Connect(function()
+        if not getgenv().aura_Enabled then
+            return
+        end
+
+        if closest_Entity then
+            local entity_root = Workspace:FindFirstChild('Alive'):FindFirstChild(closest_Entity.Name)
+            if entity_root and entity_root:FindFirstChild('Humanoid') and entity_root.Humanoid.Health > 0 then
+                if aura_table.is_Spamming then
+                    if local_player:DistanceFromCharacter(closest_Entity.HumanoidRootPart.Position) <= aura_table.spam_Range then
+                        if parry_remote then
+                            local target_position = closest_Entity.HumanoidRootPart.Position
+                            if getgenv().antiCurve_Enabled then
+                                target_position = camera.CFrame.Position + (target_position - camera.CFrame.Position).Unit * (local_player:DistanceFromCharacter(target_position) - 5)
+                            end
+                            parry_remote:FireServer(
+                                0.5,
+                                CFrame.new(camera.CFrame.Position, Vector3.zero),
+                                {[closest_Entity.Name] = target_position},
+                                {target_position.X, target_position.Y},
+                                false
+                            )
+                        end
+                    end
+                end
+            end
+        end
+    end)
+
+    RunService.PreRender:Connect(function()
+        if not getgenv().aura_Enabled then
+            return
+        end
+
+        local ping = Stats.Network.ServerStatsItem['Data Ping']:GetValue() / 10
+        local self = Nurysium_Util.getBall()
+
+        if not self then
+            return
+        end
+
+        self:GetAttributeChangedSignal('target'):Once(function()
+            aura_table.canParry = true
+        end)
+
+        if getgenv().visualizer_Enabled then
+            updateVisualizer(self:GetAttribute('target') == local_player.Name)
+            local ball_Velocity = self.AssemblyLinearVelocity
+            updateVisualizerSize(ball_Velocity.Magnitude)
+        end
+
+        if self:GetAttribute('target') ~= local_player.Name or not aura_table.canParry then
+            return
+        end
+
+        get_closest_entity(local_player.Character.PrimaryPart)
+
+        local player_Position = local_player.Character.PrimaryPart.Position
+        local ball_Position = self.Position
+        local ball_Velocity = self.AssemblyLinearVelocity
+
+        local ball_Direction = (player_Position - ball_Position).Unit
+        local ball_Distance = local_player:DistanceFromCharacter(ball_Position)
+        local ball_Speed = ball_Velocity.Magnitude
+
+        local predicted_Target_Position = predictParryPosition(ball_Position, ball_Velocity, ping)
+        local parry_Distance = math.max(math.max(ping, 4) + ball_Speed / 3.5, 9.5)
+        local parry_Position = camera.CFrame.Position + (ball_Direction * parry_Distance)
+
+        aura_table.spam_Range = math.max(ping / 10, 15) + ball_Speed / 7
+        aura_table.parry_Range = parry_Distance
+        aura_table.is_Spamming = aura_table.hit_Count > 1 or ball_Distance < 13.5
+
+        if ball_Distance <= aura_table.parry_Range and not aura_table.is_Spamming then
+            if parry_remote then
+                local target_position = predicted_Target_Position
+                if getgenv().antiCurve_Enabled then
+                    target_position = camera.CFrame.Position + (target_position - camera.CFrame.Position).Unit * (local_player:DistanceFromCharacter(target_position) - 5)
+                end
+                parry_remote:FireServer(
+                    0.5,
+                    CFrame.new(camera.CFrame.Position, target_position),
+                    {[closest_Entity.Name] = target_position},
+                    {target_position.X, target_position.Y},
+                    false
+                )
+            end
+
+            aura_table.canParry = false
+            aura_table.hit_Time = tick()
+            aura_table.hit_Count = aura_table.hit_Count + 1
+
+            task.delay(0.15, function()
+                aura_table.hit_Count = aura_table.hit_Count - 1
+            end)
+        end
+
+        task.spawn(function()
+            repeat
+                RunService.PreRender:Wait()
+            until (tick() - aura_table.hit_Time) >= 1
+            aura_table.canParry = true
+        end)
+    end)
+end)
+
+initialize_hit_sound('nurysium_temp')
+
+-- UI Elements
+tab.create_toggle({
+    name = 'Auto Parry',
+    flag = 'autoparry',
+    section = 'left',
+    enabled = false,
+    callback = function(toggled)
+       resolve_parry_remote()
+       getgenv().aura_Enabled = toggled
+    end
+})
+
+tab.create_toggle({
+    name = 'Auto Spam',
+    flag = 'autospam',
+    section = 'right',
+    enabled = false,
+    callback = function(toggled)
+        getgenv().autoSpam_Enabled = toggled
+    end
+})
+
+tab1.create_toggle({
+    name = 'Optimize',
+    flag = 'optimize',
+    section = 'left',
+    enabled = false,
+    callback = function(toggled)
+        getgenv().optimize_Enabled = toggled
+    end
+})
+
+tab.create_toggle({
+    name = 'Anti Curve',
+    flag = 'anticurve',
+    section = 'left',
+    enabled = false,
+    callback = function(toggled)
+        getgenv().antiCurve_Enabled = toggled
+    end
+})
+
+tab2.create_toggle({
+    name = 'Visualizer',
+    flag = 'visualiser',
+    section = 'left',
+    enabled = false,
+    callback = function(toggled)
+        getgenv().visualizer_Enabled = toggled
+        if toggled then
+            createVisualizer()
+        else
+            if visualizer then
+                visualizer:Destroy()
+                visualizer = nil
+            end
+        end
+    end
+})
+
+-- Optimization Function
+local Optimizer = {}
+Optimizer.Interval = 1
+Optimizer.FPSBoost = 10
+
+local function OptimizePerformance()
+    if not getgenv().optimize_Enabled then
+        return
+    end
+
+    while true do
+        if getgenv().optimize_Enabled then
+            task.wait(Optimizer.Interval)
+            local fps = Stats.RenderFPS
+            if fps < Optimizer.FPSBoost then
+                UserInputService.GamepadEnabled = false
+            end
+        end
+    end
+end
+
+OptimizePerformance()
+
+-- Adaptive Learning Function
+local function adaptStrategy()
+    if tick() - learningData.lastFailureTime < 60 then
+        autoSpam_Threshold = autoSpam_Threshold * 0.9 -- Decrease threshold for more aggressive auto-spam
+    elseif tick() - learningData.lastSuccessTime > 300 then
+        autoSpam_Threshold = autoSpam_Threshold * 1.1 -- Increase threshold to reduce aggressive auto-spam
+    end
+
+    learningData.failedAttempts = 0
+end
+
+-- Track failures
+task.spawn(function()
+    while true do
+        adaptStrategy()
+        task.wait(10) -- Adjust learning frequency
+    end
+end)
+
+-- Start auto-spam detection
+task.spawn(detectAutoSpam)
+
+print("hello lovely skidder its me kia_ainsleyy")
